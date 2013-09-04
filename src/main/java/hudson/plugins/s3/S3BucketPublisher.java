@@ -18,6 +18,7 @@ import org.kohsuke.stapler.StaplerResponse;
 
 import javax.servlet.ServletException;
 import java.io.IOException;
+import java.io.File;
 import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.List;
@@ -32,6 +33,11 @@ public final class S3BucketPublisher extends Recorder implements Describable<Pub
     public static final DescriptorImpl DESCRIPTOR = new DescriptorImpl();
 
     private final List<Entry> entries = new ArrayList<Entry>();
+
+    /**
+     * User metadata key/value pairs to tag the upload with.
+     */
+    private /*almost final*/ List<MetadataPair> userMetadata = new ArrayList<MetadataPair>();
 
 
     @DataBoundConstructor
@@ -50,8 +56,18 @@ public final class S3BucketPublisher extends Recorder implements Describable<Pub
         this.profileName = profileName;
     }
 
+    protected Object readResolve() {
+        if (userMetadata==null)
+            userMetadata = new ArrayList<MetadataPair>();
+        return this;
+    }
+
     public List<Entry> getEntries() {
         return entries;
+    }
+
+    public List<MetadataPair> getUserMetadata() {
+        return userMetadata;
     }
 
     public S3Profile getProfile() {
@@ -86,10 +102,11 @@ public final class S3BucketPublisher extends Recorder implements Describable<Pub
                            BuildListener listener)
             throws InterruptedException, IOException {
 
-        if (build.getResult() == Result.FAILURE) {
+        //TODO: implement a checkbox or dropdown to save a preference for uploading after a failure
+        //if (build.getResult() == Result.FAILURE) {
             // build failed. don't post
-            return true;
-        }
+            //return true;
+        //}
 
         S3Profile profile = getProfile();
         if (profile == null) {
@@ -113,10 +130,22 @@ public final class S3BucketPublisher extends Recorder implements Describable<Pub
                     if (error != null)
                         log(listener.getLogger(), error);
                 }
+
+                int searchPathLength = getSearchPathLength(ws.getRemote(), expanded);
+
                 String bucket = Util.replaceMacro(entry.bucket, envVars);
+                String storageClass = Util.replaceMacro(entry.storageClass, envVars);
+                String selRegion = entry.selectedRegion;
+                List<MetadataPair> escapedUserMetadata = new ArrayList<MetadataPair>();
+                for (MetadataPair metadataPair : userMetadata) {
+                    MetadataPair escapedMetadataPair = new MetadataPair();
+                    escapedMetadataPair.key = Util.replaceMacro(metadataPair.key, envVars);
+                    escapedMetadataPair.value = Util.replaceMacro(metadataPair.value, envVars);
+                    escapedUserMetadata.add(escapedMetadataPair);
+                }
                 for (FilePath src : paths) {
-                    log(listener.getLogger(), "bucket=" + bucket + ", file=" + src.getName());
-                    profile.upload(bucket, src);
+                    log(listener.getLogger(), "bucket=" + bucket + ", file=" + src.getName() + " region = " + selRegion);
+                    profile.upload(bucket, src, searchPathLength, escapedUserMetadata, storageClass, selRegion);
                 }
             }
         } catch (IOException e) {
@@ -125,6 +154,26 @@ public final class S3BucketPublisher extends Recorder implements Describable<Pub
         }
         return true;
     }
+
+    private int getSearchPathLength(String workSpace, String filterExpanded) {
+        File file1 = new File(workSpace);
+        File file2 = new File(file1, filterExpanded);
+
+        String pathWithFilter = file2.getPath();
+
+        int indexOfWildCard = pathWithFilter.indexOf("*");
+
+        if (indexOfWildCard > 0)
+        {
+            String s = pathWithFilter.substring(0, indexOfWildCard);
+            return s.length();
+        }
+        else
+        {
+            return pathWithFilter.length();
+        }
+    }
+
 
     public BuildStepMonitor getRequiredMonitorService() {
         return BuildStepMonitor.STEP;
@@ -159,6 +208,7 @@ public final class S3BucketPublisher extends Recorder implements Describable<Pub
             S3BucketPublisher pub = new S3BucketPublisher();
             req.bindParameters(pub, "s3.");
             pub.getEntries().addAll(req.bindParametersToList(Entry.class, "s3.entry."));
+            pub.getUserMetadata().addAll(req.bindParametersToList(MetadataPair.class, "s3.metadataPair."));
             return pub;
         }
 

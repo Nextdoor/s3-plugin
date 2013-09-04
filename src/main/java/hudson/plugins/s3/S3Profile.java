@@ -3,20 +3,24 @@ package hudson.plugins.s3;
 import hudson.FilePath;
 
 import java.io.IOException;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.List;
 
 import org.kohsuke.stapler.DataBoundConstructor;
 
 import com.amazonaws.auth.BasicAWSCredentials;
+import com.amazonaws.regions.Region;
+import com.amazonaws.regions.RegionUtils;
+import com.amazonaws.regions.Regions;
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.amazonaws.services.s3.model.ObjectMetadata;
 import com.amazonaws.services.s3.internal.Mimetypes;
+import hudson.util.Secret;
 
 public class S3Profile {
     private String name;
     private String accessKey;
-    private String secretKey;
-    private static final AtomicReference<AmazonS3Client> client = new AtomicReference<AmazonS3Client>(null);
+    private Secret secretKey;
+    private transient volatile AmazonS3Client client = null;
 
     public S3Profile() {
     }
@@ -25,8 +29,8 @@ public class S3Profile {
     public S3Profile(String name, String accessKey, String secretKey) {
         this.name = name;
         this.accessKey = accessKey;
-        this.secretKey = secretKey;
-        client.set(new AmazonS3Client(new BasicAWSCredentials(accessKey, secretKey)));
+        this.secretKey = Secret.fromString(secretKey);
+        client = new AmazonS3Client(new BasicAWSCredentials(accessKey, secretKey));
     }
 
     public final String getAccessKey() {
@@ -37,12 +41,8 @@ public class S3Profile {
         this.accessKey = accessKey;
     }
 
-    public final String getSecretKey() {
+    public final Secret getSecretKey() {
         return secretKey;
-    }
-
-    public void setSecretKey(String secretKey) {
-        this.secretKey = secretKey;
     }
 
     public final String getName() {
@@ -54,29 +54,40 @@ public class S3Profile {
     }
 
     public AmazonS3Client getClient() {
-        if (client.get() == null) {
-            client.set(new AmazonS3Client(new BasicAWSCredentials(accessKey, secretKey)));
+        if (client == null) {
+            client = new AmazonS3Client(new BasicAWSCredentials(accessKey, secretKey.getPlainText()));
         }
-        return client.get();
+        return client;
     }
 
     public void check() throws Exception {
         getClient().listBuckets();
     }
-    
-    
-   
-    public void upload(String bucketName, FilePath filePath) throws IOException, InterruptedException {
+
+
+
+    public void upload(String bucketName, FilePath filePath, int searchPathLength, List<MetadataPair> userMetadata, String storageClass, String selregion) throws IOException, InterruptedException {
         if (filePath.isDirectory()) {
             throw new IOException(filePath + " is a directory");
         }
-        
-        final Destination dest = new Destination(bucketName,filePath.getName());
-        
+
+        String relativeFileName = filePath.getRemote();
+        relativeFileName = relativeFileName.substring(searchPathLength);
+
+        final Destination dest = new Destination(bucketName,relativeFileName);
+
         ObjectMetadata metadata = new ObjectMetadata();
         metadata.setContentType(Mimetypes.getInstance().getMimetype(filePath.getName()));
         metadata.setContentLength(filePath.length());
+        if ((storageClass != null) && !"".equals(storageClass)) {
+            metadata.setHeader("x-amz-storage-class", storageClass);
+        }
+        for (MetadataPair metadataPair : userMetadata) {
+            metadata.addUserMetadata(metadataPair.key, metadataPair.value);
+        }
         try {
+            Region region = RegionUtils.getRegion(Regions.valueOf(selregion).getName());
+            getClient().setRegion(region);
             getClient().putObject(dest.bucketName, dest.objectName, filePath.read(), metadata);
         } catch (Exception e) {
             throw new IOException("put " + dest + ": " + e);
